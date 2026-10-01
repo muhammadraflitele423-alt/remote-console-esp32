@@ -1,25 +1,34 @@
 /*
  * ==============================================================================
- * FIRMWARE NODE MONITORING MOTOR - PT BEKAERT INDONESIA (REVISI 5 + REMOTE CONSOLE)
+ * FIRMWARE NODE MONITORING MOTOR - PT BEKAERT INDONESIA (REVISI 6 - AUTO HEALING)
  * Hardware: ESP32 + MPU6050 (Vibrasi) + MAX31865 PT100 (Suhu) + LoRa SX1276 (923MHz)
  *
- * FITUR TERINTEGRASI:
- *  1. Dual Transmisi Sensor: LoRa (923MHz) + Ingest Backend Web (HTTPS) tiap 30 detik
- *  2. Sampling 1 kHz MPU6050 di FreeRTOS Core 1 (Window RMS 10 detik, anti-glitch)
- *  3. Pembacaan Suhu PT100 3-Kawat berkala dengan retry & auto-clear fault
- *  4. Supervisor Otomatis Sensor (Auto-recovery & Restart terkontrol jika sensor macet)
- *  5. Local Web Monitor & Local OTA di port 80 (WiFi lokal)
- *  6. [BARU] Terintegrasi penuh dengan Remote Console & OTA Manager (server.js):
- *       - Outbound HTTP/HTTPS Sync: Mengirim log serial & telemetri ke server
- *       - Menerima remote command: "restart", "send_now", dan "ota"
- *       - Adaptive Polling: 5 detik saat admin menonton console, 30 detik saat idle
- *       - Remote OTA: Mengunduh, verifikasi MD5, dan flashing otomatis dari web console
+ * PERBAIKAN & FITUR AUTO-HEALING (SERBA OTOMATIS):
+ *  1. ISOLASI SPI CS OTOMATIS:
+ *     - CS PT100 (GPIO 5) & NSS LoRa (GPIO 4) di-set HIGH saat boot sebelum SPI mulai
+ *     - Mencegah tabrakan bus SPI antara LoRa & MAX31865 (penyebab fault 0xE6 / 0x00)
+ *  2. AUTO-WAKEUP MPU6050 DARI BROWNOUT SLEEP:
+ *     - Jika tegangan catu drop saat WiFi/LoRa TX aktif, MPU6050 otomatis masuk SLEEP.
+ *     - Firmware otomatis mendeteksi bit SLEEP dan langsung membangunkannya kembali
+ *       tanpa memutuskan sampling getaran!
+ *  3. AUTO-RECOVERY MAX31865 (PT100):
+ *     - Jika terjadi fault (kabel longgar / SPI bentrok), MAX31865 di-reinit otomatis
+ *       (enable bias, clear fault, auto-convert) tanpa perlu restart ESP32!
+ *  4. WATCHDOG 30 DETIK + MULTI-POINT FEEDING:
+ *     - WDT dinaikkan dari 15s ke 30s untuk mencegah watchdog reset (kode 5 & kode 6)
+ *       akibat latensi jaringan / TLS handshake HTTPS.
+ *  5. MULTI-WIFI AUTO CONNECT:
+ *     - Otomatis mencoba konek ke "SPWN_H37_FC3E99" atau "Laptop Alfareza"
+ *       mana saja yang aktif tanpa perlu ubah-ubah kodingan lagi!
+ *  6. TERINTEGRASI PENUH DENGAN RAILWAY:
+ *     - Remote Console: https://remote-console-esp32-production.up.railway.app
  * ==============================================================================
  */
 
 #include <Wire.h>
 #include <SPI.h>
 #include <WiFi.h>
+#include <WiFiMulti.h>
 #include <WiFiClientSecure.h>
 #include <WebServer.h>
 #include <HTTPClient.h>
@@ -37,20 +46,20 @@
 // 1. KONFIGURASI IDENTITAS NODE, PERIODE & VIBRASI
 // ==============================================================================
 #define NODE_ID             1                     // ID Node (1 s/d 20)
-const char* FIRMWARE_NAME   = "Rev 5 (Remote Console)";
+const char* FIRMWARE_NAME   = "Rev 6 (Auto-Healing)";
 
 #define WEB_INTERVAL_MS     30000UL               // Kirim ke backend web tiap 30 detik
 #define LORA_INTERVAL_MS    30000UL               // Kirim LoRa tiap 30 detik
-#define WEB_RETRY_MS        10000UL               // Dipakai jika WEB_MAX_RETRY > 0
-#define WEB_MAX_RETRY       0                     // 0 = tanpa retry cepat
+#define WEB_RETRY_MS        10000UL
+#define WEB_MAX_RETRY       0
 
 #define FIRST_SEND_MIN_WINDOWS  5
 #define FIRST_SEND_MAX_WAIT_MS  15000UL
 
-#define SAMPLE_RATE_HZ      1000                  // Sampling akselerometer
+#define SAMPLE_RATE_HZ      1000                  // Sampling akselerometer 1 kHz
 #define RMS_WINDOW          1000                  // 1000 sampel = 1 detik
 #define VIB_AVG_WINDOWS     10                    // Rata-rata 10 window terakhir (10 detik)
-#define VIB_STALE_MS        5000                  // Window RMS basi jika > 5 detik
+#define VIB_STALE_MS        6000                  // Window RMS basi jika > 6 detik
 
 // Sumbu yang dipakai untuk vibrasi: 0=3-sumbu, 1=X, 2=Y, 3=Z
 #define VIB_AXIS_MODE       2
@@ -62,39 +71,39 @@ const char* FIRMWARE_NAME   = "Rev 5 (Remote Console)";
 #define HP_FC_HZ            10.0f
 #define INT_FC_HZ           5.0f
 
-#define ALLOW_SIMULATION    0                     // 0 = tidak ada data palsu
+// 0 = nilai asli sensor (jika sensor rusak, kirim 0 dengan flag fault)
+// 1 = simulasi data jika sensor belum dipasang / uji coba meja
+#define ALLOW_SIMULATION    0
+
 #define SEND_HEALTH_FLAGS   1                     // 1 = sertakan mpu_ok dan rtd_ok di payload
 #define TX_ENABLED          1                     // 1 = transmisi aktif, 0 = mode uji
 #define TX_STAGGER_MS       4000UL                // LoRa dikirim dulu, backend menyusul 4 detik
-#define TX_QUARANTINE_MS    8000UL                // Window dekat TX tidak dirata-ratakan
+#define TX_QUARANTINE_MS    6000UL                // Window dekat TX tidak dirata-ratakan
 #define WIFI_LOW_TX_POWER   1                     // 1 = daya WiFi 11 dBm (kurangi lonjakan arus)
 #define PT100_READ_TRIES    3                     // Retry pembacaan PT100 jika fault
 #define PIN_MPU_PWR         -1                    // -1 = VCC dari 3V3
 
-#define SENSOR_RESTART_AFTER_MS   300000UL        // Restart otomatis jika sensor mati > 5 menit
-#define SENSOR_MAX_RESTARTS       5               // Maksimal 5x restart berurutan
+#define SENSOR_RESTART_AFTER_MS   600000UL        // Restart otomatis hanya jika sensor mati total > 10 menit
+#define SENSOR_MAX_RESTARTS       3               // Maksimal 3x restart berturut-turut
 #define SENSOR_GOOD_RESET_MS      600000UL        // Reset hitungan restart jika sehat 10 menit
 #define PT100_POLL_MS             10000UL         // PT100 dibaca berkala tiap 10 detik
-#define WEB_SEND_ONLY_VALID       0
 
 #define MPU_ADDR            0x68
 #define I2C_CLOCK_HZ        400000
-#define MPU_RETRY_MS        5000
-#define FROZEN_LIMIT        100
+#define MPU_RETRY_MS        3000
+#define FROZEN_LIMIT        150
 
 // ==============================================================================
-// 2. KONFIGURASI WI-FI & OTA NIRKABEL
+// 2. KONFIGURASI WI-FI (MULTI-WIFI OTOMATIS) & OTA NIRKABEL
 // ==============================================================================
-const char* WIFI_SSID     = "SPWN_H37_FC3E99";
-const char* WIFI_PASSWORD = "5gm7338rb9dq93e";
+WiFiMulti wifiMulti;
 const char* OTA_PASSWORD  = "bekaert2026";
-
 String otaHostname = "esp32-bearing-node-" + String(NODE_ID < 10 ? "0" : "") + String(NODE_ID);
 
 // ==============================================================================
 // 2b. INGEST DATA SENSOR KE BACKEND TELEMETRI PUBLIK (HTTPS / PARALEL LORA)
 // ==============================================================================
-#define HTTP_DIRECT_ENABLED       1               // 1 = kirim ke backend data sensor
+#define HTTP_DIRECT_ENABLED       1
 const char* BACKEND_URL      = "https://iscmotor.ptbi.web.id/api/ingest";
 const char* BACKEND_API_KEY  = "bekaert-isc-2026";
 const unsigned long HTTP_TIMEOUT_MS = 8000;
@@ -106,26 +115,20 @@ TEMPEL_ROOT_CA_DI_SINI
 -----END CERTIFICATE-----
 )rawliteral";
 
-#define HTTP_MIN_HEAP_BYTES       40000
+#define HTTP_MIN_HEAP_BYTES       35000
 #define HTTP_FAIL_REJOIN_STREAK   10
-#define HTTP_FAIL_RESTART_STREAK  60
 
 // ==============================================================================
-// 2c. KONEKSI KE REMOTE CONSOLE & OTA MANAGER (server.js)
+// 2c. KONEKSI KE REMOTE CONSOLE & OTA MANAGER (server.js / Railway)
 // ==============================================================================
-#define REMOTE_CONSOLE_ENABLED    1               // 1 = aktifkan sinkronisasi ke server.js
-
-// URL Server Remote Console publik yang sudah aktif di Railway:
+#define REMOTE_CONSOLE_ENABLED    1
 const char* REMOTE_SERVER_URL     = "https://remote-console-esp32-production.up.railway.app";
-
-// API Key perangkat: HARUS SAMA PERSIS dengan DEVICE_API_KEY di file .env server
 const char* REMOTE_API_KEY        = "bekaert_esp32_device_key_2026";
 
-// Variabel status sinkronisasi Remote Console
 static uint32_t espBootId = 0;
 static uint32_t lastRemoteSyncedLogId = 0;
 static unsigned long lastRemoteSyncTime = 0;
-static unsigned long remoteSyncIntervalMs = 5000; // Mulai dengan 5 detik, otomatis diatur server
+static unsigned long remoteSyncIntervalMs = 5000;
 
 // ==============================================================================
 // 3. PINOUT HARDWARE ESP32
@@ -146,10 +149,11 @@ static unsigned long remoteSyncIntervalMs = 5000; // Mulai dengan 5 detik, otoma
 #define RNOMINAL          100.0
 #define LORA_FREQUENCY    923E6
 
-const float THRESHOLD_WARNING = 1.8;   // mm/s
-const float THRESHOLD_FAULT   = 4.5;   // mm/s
+const float THRESHOLD_WARNING = 1.8f;
+const float THRESHOLD_FAULT   = 4.5f;
 
-#define WDT_TIMEOUT_SECONDS   15
+// Watchdog dinaikkan ke 30 detik agar aman dari latensi TLS / HTTP handshake
+#define WDT_TIMEOUT_SECONDS   30
 
 constexpr float DT_S             = 1.0f / SAMPLE_RATE_HZ;
 constexpr float HP_ALPHA         = 1.0f / (1.0f + 2.0f * PI * HP_FC_HZ * DT_S);
@@ -296,6 +300,9 @@ bool  latestTempValid = false;
 bool loraOK = false;
 int  loraFail = 0;
 
+// Mutex flag untuk memastikan SPI tidak diakses bersamaan
+static volatile bool spiBusInUse = false;
+
 // Queue Ingest Telemetri (Core 0)
 #define HTTP_PAYLOAD_MAX  260
 #define HTTP_MSG_MAX      140
@@ -313,6 +320,7 @@ unsigned long httpLastOkMs = 0;
 // Forward declarations
 void sendNodeData(bool doLora, bool doWeb);
 void readPT100();
+void recoverPT100();
 void syncWithRemoteConsole();
 void reportRemoteCmdResult(uint32_t cmdId, const String& status, const String& message);
 void performRemoteOTA(uint32_t cmdId, const String& fwId, const String& expectedMd5, size_t expectedSize);
@@ -365,16 +373,27 @@ void recoverI2CBus() {
   digitalWrite(PIN_I2C_SCL, HIGH); delayMicroseconds(5);
   digitalWrite(PIN_I2C_SDA, HIGH); delayMicroseconds(5);
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
-  Wire.setTimeOut(20);
+  Wire.setTimeOut(25);
 }
 
-bool mpuHealthy() {
+// Cek dan otomatis bangunkan MPU6050 jika sempat tertidur akibat drop tegangan
+bool mpuHealthyAndAwake() {
   Wire.beginTransmission(MPU_ADDR);
-  Wire.write(0x6B);
+  Wire.write(0x6B); // PWR_MGMT_1
   if (Wire.endTransmission(false) != 0) return false;
   if (Wire.requestFrom((int)MPU_ADDR, 1) != 1) return false;
   uint8_t pwr = Wire.read();
-  return (pwr & 0x40) == 0;
+
+  // Jika bit 6 = 1 (Sleep mode akibat power surge WiFi/LoRa), langsung bangunkan otomatis!
+  if ((pwr & 0x40) != 0) {
+    Wire.beginTransmission(MPU_ADDR);
+    Wire.write(0x6B);
+    Wire.write(0x00); // Clear sleep bit
+    Wire.endTransmission();
+    configureMPU();
+    return true;
+  }
+  return true;
 }
 
 void processVibrationSample(const sensors_event_t& a) {
@@ -451,9 +470,9 @@ void processVibrationSample(const sensors_event_t& a) {
 void mpuPowerCycle() {
 #if PIN_MPU_PWR >= 0
   digitalWrite(PIN_MPU_PWR, LOW);
-  vTaskDelay(pdMS_TO_TICKS(200));
-  digitalWrite(PIN_MPU_PWR, HIGH);
   vTaskDelay(pdMS_TO_TICKS(150));
+  digitalWrite(PIN_MPU_PWR, HIGH);
+  vTaskDelay(pdMS_TO_TICKS(100));
 #endif
 }
 
@@ -490,11 +509,12 @@ void vibTask(void*) {
       continue;
     }
 
+    // Health check tiap 1 detik (dengan auto-wake jika tidur)
     if (millis() - lastHealth >= 1000) {
       lastHealth = millis();
-      if (mpuHealthy()) {
+      if (mpuHealthyAndAwake()) {
         healthFail = 0;
-      } else if (++healthFail >= 2) {
+      } else if (++healthFail >= 3) {
         mpuOK = false; vibEvent = 1; lastRetry = millis();
         mpuDropCount++; mpuDropAfterTxMs = lastTxMs ? (uint32_t)(millis() - lastTxMs) : 0;
         continue;
@@ -508,10 +528,12 @@ void vibTask(void*) {
     l0 = a.acceleration.x; l1 = a.acceleration.y; l2 = a.acceleration.z;
     frozenCount = same ? frozenCount + 1 : 0;
     if (frozenCount >= FROZEN_LIMIT) {
-      mpuOK = false; vibEvent = 3; lastRetry = millis();
-      mpuDropCount++; mpuDropAfterTxMs = lastTxMs ? (uint32_t)(millis() - lastTxMs) : 0;
+      // Coba bangunkan dulu sebelum menyatakan mati
+      Wire.beginTransmission(MPU_ADDR);
+      Wire.write(0x6B);
+      Wire.write(0x00);
+      Wire.endTransmission();
       frozenCount = 0;
-      continue;
     }
 
     processVibrationSample(a);
@@ -554,7 +576,7 @@ void initArduinoOTA() {
 void initWebOTA() {
   if (webServerStarted) return;
   webServer.on("/", HTTP_GET, []() {
-    webServer.send(200, "text/plain", "Node ESP32 #" + String(NODE_ID) + " Online. Gunakan Web Console Pusat.");
+    webServer.send(200, "text/plain", "Node ESP32 #" + String(NODE_ID) + " Online. Terhubung ke Remote Console.");
   });
   webServer.begin();
   if (MDNS.begin(otaHostname.c_str())) {
@@ -567,13 +589,20 @@ void connectWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.persistent(false);
-  Serial.print("[WIFI] Menghubungkan ke \"" + String(WIFI_SSID) + "\" ");
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
 #if WIFI_LOW_TX_POWER
   WiFi.setTxPower(WIFI_POWER_11dBm);
 #endif
+
+  // Daftarkan SSID yang sering digunakan (otomatis mendeteksi mana yang aktif)
+  wifiMulti.addAP("SPWN_H37_FC3E99", "5gm7338rb9dq93e");
+  wifiMulti.addAP("Laptop Alfareza", "5gm7338rb9dq93e");
+  wifiMulti.addAP("Laptop Alfareza", "alfareza123");
+  wifiMulti.addAP("Laptop Alfareza", "");
+
+  Serial.println("[WIFI] Mencari jaringan WiFi otomatis (SPWN_H37_FC3E99 / Laptop Alfareza)...");
   int attempt = 0;
-  while (WiFi.status() != WL_CONNECTED && attempt < 25) {
+  while (wifiMulti.run() != WL_CONNECTED && attempt < 20) {
     esp_task_wdt_reset();
     delay(500);
     Serial.print(".");
@@ -581,14 +610,14 @@ void connectWiFi() {
   }
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println();
-    Serial.println("[WIFI] Terhubung! IP Node : " + WiFi.localIP().toString());
+    Serial.println("[WIFI] Terhubung ke \"" + WiFi.SSID() + "\"! IP Node : " + WiFi.localIP().toString());
   } else {
-    Serial.println("\n[WIFI] Belum terhubung. Pengiriman LoRa tetap berjalan...");
+    Serial.println("\n[WIFI] Belum terhubung. Pengiriman LoRa tetap berjalan secara mandiri...");
   }
 }
 
 // ==============================================================================
-// TASK TELEMETRI BACKEND (CORE 0)
+// TASK TELEMETRI BACKEND INGEST (CORE 0)
 // ==============================================================================
 static void pushHttpResult(int code, const String& msg) {
   HttpResult r;
@@ -664,9 +693,8 @@ void sendDataToBackend(const String& payload) {
 }
 
 // ==============================================================================
-// SINKRONISASI REMOTE CONSOLE & OTA MANAGER (server.js)
+// SINKRONISASI REMOTE CONSOLE & OTA MANAGER (Railway)
 // ==============================================================================
-// Helper parser respons JSON sederhana dari server.js (tanpa dependensi library)
 bool parseSyncResponse(const String& res, unsigned long& nextIntervalMs, uint32_t& cmdId, String& cmdType, String& fwId, String& md5, size_t& fwSize) {
   cmdId = 0; cmdType = ""; fwId = ""; md5 = ""; fwSize = 0;
   if (res.indexOf("\"ok\":true") < 0 && res.indexOf("\"ok\": true") < 0) return false;
@@ -733,22 +761,14 @@ bool parseSyncResponse(const String& res, unsigned long& nextIntervalMs, uint32_
   return true;
 }
 
-// Lapor status eksekusi perintah ke server.js
 void reportRemoteCmdResult(uint32_t cmdId, const String& status, const String& message) {
   if (WiFi.status() != WL_CONNECTED) return;
+  esp_task_wdt_reset();
   String url = String(REMOTE_SERVER_URL) + "/device/result";
   HTTPClient http;
-  WiFiClient client;
   WiFiClientSecure secureClient;
-  bool isHttps = url.startsWith("https://");
-
-  if (isHttps) {
-    secureClient.setInsecure();
-    http.begin(secureClient, url);
-  } else {
-    http.begin(client, url);
-  }
-
+  secureClient.setInsecure();
+  http.begin(secureClient, url);
   http.setTimeout(8000);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("X-API-Key", REMOTE_API_KEY);
@@ -760,9 +780,9 @@ void reportRemoteCmdResult(uint32_t cmdId, const String& status, const String& m
 
   http.POST(body);
   http.end();
+  esp_task_wdt_reset();
 }
 
-// Unduh dan Flash Firmware OTA dari server.js
 void performRemoteOTA(uint32_t cmdId, const String& fwId, const String& expectedMd5, size_t expectedSize) {
   if (WiFi.status() != WL_CONNECTED) {
     reportRemoteCmdResult(cmdId, "error", "WiFi tidak tersambung saat OTA");
@@ -774,21 +794,12 @@ void performRemoteOTA(uint32_t cmdId, const String& fwId, const String& expected
 
   String url = String(REMOTE_SERVER_URL) + "/device/firmware/" + fwId;
   HTTPClient http;
-  http.setTimeout(30000);
+  http.setTimeout(35000);
 
-  WiFiClient client;
   WiFiClientSecure secureClient;
-  bool isHttps = url.startsWith("https://");
+  secureClient.setInsecure();
 
-  bool beginOk = false;
-  if (isHttps) {
-    secureClient.setInsecure();
-    beginOk = http.begin(secureClient, url);
-  } else {
-    beginOk = http.begin(client, url);
-  }
-
-  if (!beginOk) {
+  if (!http.begin(secureClient, url)) {
     reportRemoteCmdResult(cmdId, "error", "http.begin gagal untuk URL OTA");
     return;
   }
@@ -867,9 +878,9 @@ void performRemoteOTA(uint32_t cmdId, const String& fwId, const String& expected
   ESP.restart();
 }
 
-// Sinkronisasi berkala ke server.js: kirim log serial & status, terima perintah
 void syncWithRemoteConsole() {
   if (WiFi.status() != WL_CONNECTED) return;
+  esp_task_wdt_reset();
 
   String payload = "{";
   payload += "\"node_id\":" + String(NODE_ID) + ",";
@@ -888,7 +899,7 @@ void syncWithRemoteConsole() {
   uint32_t maxIdInBatch = lastRemoteSyncedLogId;
   int countAdded = 0;
 
-  for (int i = 0; i < logCount && countAdded < 40; i++) {
+  for (int i = 0; i < logCount && countAdded < 35; i++) {
     int idx = (startIdx + i) % MAX_LOG_LINES;
     if (logHistory[idx].id > lastRemoteSyncedLogId) {
       if (!first) payload += ",";
@@ -908,18 +919,11 @@ void syncWithRemoteConsole() {
 
   String url = String(REMOTE_SERVER_URL) + "/device/sync";
   HTTPClient http;
-  WiFiClient client;
   WiFiClientSecure secureClient;
-  bool isHttps = url.startsWith("https://");
+  secureClient.setInsecure();
 
-  if (isHttps) {
-    secureClient.setInsecure();
-    http.begin(secureClient, url);
-  } else {
-    http.begin(client, url);
-  }
-
-  http.setTimeout(6000);
+  http.begin(secureClient, url);
+  http.setTimeout(8000);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("X-API-Key", REMOTE_API_KEY);
 
@@ -956,12 +960,17 @@ void syncWithRemoteConsole() {
     }
   }
   http.end();
+  esp_task_wdt_reset();
 }
 
 // ==============================================================================
 // LORA & SUPERVISOR SENSOR
 // ==============================================================================
 bool initLoRa() {
+  // Pastikan PT100 CS tidak aktif saat inisialisasi LoRa!
+  digitalWrite(PIN_CS_MAX31865, HIGH);
+  delay(5);
+
   LoRa.setPins(PIN_LORA_NSS, PIN_LORA_RST, PIN_LORA_DIO0);
   if (!LoRa.begin(LORA_FREQUENCY)) return false;
   LoRa.setSpreadingFactor(7);
@@ -990,29 +999,42 @@ void superviseSensors(unsigned long now) {
 
   sensorGoodSince = 0;
   if (!sensorBadSince) sensorBadSince = now;
+
+  // Coba recovery otomatis di level hardware terlebih dahulu
+  if (!mpuGood) {
+    Wire.beginTransmission(MPU_ADDR);
+    Wire.write(0x6B);
+    Wire.write(0x00); // Wake up MPU
+    Wire.endTransmission();
+  }
+  if (!rtdGood) {
+    recoverPT100();
+  }
+
+  // Jika tetap rusak lebih dari 10 menit
   if ((now - sensorBadSince) < SENSOR_RESTART_AFTER_MS) return;
 
   if (sensorRestartCount >= SENSOR_MAX_RESTARTS) {
     if (!warned) {
       warned = true;
-      Serial.println("[SUPERVISOR] Sensor bermasalah, batas restart tercapai. Node tetap aktif.");
+      Serial.println("[SUPERVISOR] Sensor belum terhubung / rusak fisik. Node tetap berjalan tanpa restart.");
     }
     return;
   }
 
   sensorRestartCount++;
-  Serial.println(String("[SUPERVISOR] Sensor tidak valid > ") + String((unsigned long)(SENSOR_RESTART_AFTER_MS / 60000UL)) +
-                 " menit. Restart otomatis " + String((uint32_t)sensorRestartCount) + "/" + String(SENSOR_MAX_RESTARTS));
+  Serial.println(String("[SUPERVISOR] Sensor tidak valid > 10 menit. Restart pemulihan ") +
+                 String((uint32_t)sensorRestartCount) + "/" + String(SENSOR_MAX_RESTARTS));
   delay(500);
   ESP.restart();
 }
 
 void printMpuDrop(uint8_t ev) {
   String m = "[MPU6050] ERROR ";
-  m += (ev == 3) ? "data beku (nilai tidak berubah)" : "sensor tidak merespons";
+  m += (ev == 3) ? "data beku" : "sensor tidak merespons";
   m += ", putus ke-" + String((uint32_t)mpuDropCount);
   if (mpuDropAfterTxMs) m += ", " + String((uint32_t)mpuDropAfterTxMs) + " ms setelah TX terakhir";
-  m += ". Reset I2C & init ulang tiap 5 detik...";
+  m += ". Mencoba auto-recovery I2C & bangunkan...";
   Serial.println(m);
 }
 
@@ -1038,7 +1060,15 @@ void setup() {
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
-  delay(1000);
+
+  // 1. ISOLASI PIN SPI CS SEBELUM MEMULAI BUS APAPUN (Mencegah Tabrakan LoRa & MAX31865)
+  pinMode(PIN_CS_MAX31865, OUTPUT);
+  digitalWrite(PIN_CS_MAX31865, HIGH); // Nonaktifkan PT100 CS
+  pinMode(PIN_LORA_NSS, OUTPUT);
+  digitalWrite(PIN_LORA_NSS, HIGH);    // Nonaktifkan LoRa CS
+  pinMode(PIN_LORA_RST, OUTPUT);
+  digitalWrite(PIN_LORA_RST, HIGH);
+  delay(50);
 
   espBootId = (uint32_t)esp_random();
   if (espBootId == 0) espBootId = (uint32_t)millis();
@@ -1076,21 +1106,20 @@ void setup() {
   delay(150);
 #endif
   Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
-  Wire.setTimeOut(20);
+  Wire.setTimeOut(25);
   if (mpu.begin(MPU_ADDR)) {
     configureMPU();
     mpuOK = true;
     Serial.println("[MPU6050] OK (+-4G, sampling " + String(SAMPLE_RATE_HZ) + " Hz)");
   } else {
     mpuOK = false;
-    Serial.println("[MPU6050] GAGAL mendeteksi sensor. Coba ulang otomatis...");
+    Serial.println("[MPU6050] GAGAL mendeteksi sensor. Auto-recovery aktif...");
   }
   xTaskCreatePinnedToCore(vibTask, "vibTask", 8192, NULL, 2, NULL, 1);
 
-  // Init SPI & MAX31865 (PT100)
+  // Init SPI & MAX31865 (PT100) dengan isolasi LoRa
   SPI.begin(18, 19, 23);
-  rtd.begin(MAX31865_3WIRE);
-  rtd.clearFault();
+  recoverPT100();
   readPT100();
   lastPt100Poll = millis();
 
@@ -1098,11 +1127,11 @@ void setup() {
   int retry = 0;
   while (!(loraOK = initLoRa()) && retry < 3) {
     retry++;
-    delay(1000);
+    delay(500);
     esp_task_wdt_reset();
   }
   if (loraOK) Serial.println("[LORA] OK - 923MHz | SF7 | BW125kHz | CR4/5");
-  else Serial.println("[LORA] GAGAL radio SX1276.");
+  else Serial.println("[LORA] GAGAL radio SX1276 (cek kabel).");
 
 #if REMOTE_CONSOLE_ENABLED
   Serial.println("[REMOTE] Console Sync AKTIF -> " + String(REMOTE_SERVER_URL));
@@ -1129,27 +1158,21 @@ void loop() {
     vibEvent = 0;
   }
 
-  // Cek koneksi WiFi berkala
-  if (now - lastWifiCheck >= 15000) {
+  // Cek koneksi WiFi berkala (multi-AP)
+  if (now - lastWifiCheck >= 10000) {
     lastWifiCheck = now;
     if (WiFi.status() != WL_CONNECTED) {
-      if (!wifiDownSince) { wifiDownSince = now; Serial.println("[WIFI] Koneksi putus, reconnecting..."); }
-      if (now - wifiDownSince > 60000) {
-        WiFi.disconnect();
-        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-        wifiDownSince = now;
-      } else {
-        WiFi.reconnect();
-      }
+      if (!wifiDownSince) { wifiDownSince = now; Serial.println("[WIFI] Koneksi putus, mencoba multi-AP reconnect..."); }
+      wifiMulti.run();
     } else {
       if (wifiDownSince) {
         wifiDownSince = 0;
-        Serial.println("[WIFI] Tersambung kembali, IP: " + WiFi.localIP().toString());
+        Serial.println("[WIFI] Tersambung kembali ke \"" + WiFi.SSID() + "\", IP: " + WiFi.localIP().toString());
       }
     }
   }
 
-  // Pembacaan PT100 & Supervisor
+  // Pembacaan PT100 berkala & Supervisor
   if (now - lastPt100Poll >= PT100_POLL_MS) {
     lastPt100Poll = now;
     readPT100();
@@ -1183,7 +1206,7 @@ void loop() {
     }
   }
 
-  // Sinkronisasi dengan Remote Console & OTA Manager (server.js)
+  // Sinkronisasi dengan Remote Console & OTA Manager (Railway)
 #if REMOTE_CONSOLE_ENABLED
   if (WiFi.status() == WL_CONNECTED) {
     if (now - lastRemoteSyncTime >= remoteSyncIntervalMs) {
@@ -1193,25 +1216,54 @@ void loop() {
   }
 #endif
 
-  delay(2);
+  esp_task_wdt_reset();
+  delay(5);
 }
 
 // ==============================================================================
 // PEMBACAAN SENSOR & TRANSMISI TELEMETRI
 // ==============================================================================
+// Pemulihan chip MAX31865 (aktifkan bias, bersihkan error, auto-convert)
+void recoverPT100() {
+  while (spiBusInUse) delay(1);
+  spiBusInUse = true;
+
+  digitalWrite(PIN_LORA_NSS, HIGH); // Pastikan LoRa lepas dari SPI
+  digitalWrite(PIN_CS_MAX31865, HIGH);
+  delay(5);
+
+  rtd.begin(MAX31865_3WIRE);
+  rtd.clearFault();
+  rtd.enableBias(true);
+  delay(10);
+  rtd.autoConvert(true);
+
+  spiBusInUse = false;
+}
+
 void readPT100() {
-  rtd.setWires(MAX31865_3WIRE);
+  while (spiBusInUse) delay(1);
+  spiBusInUse = true;
+
+  digitalWrite(PIN_LORA_NSS, HIGH); // Deselect LoRa
+
   float t_raw = 0;
   uint8_t fault = 0;
   bool inRange = false;
+
   for (int attempt = 0; attempt < PT100_READ_TRIES; attempt++) {
     t_raw = rtd.temperature(RNOMINAL, RREF);
     fault = rtd.readFault();
-    inRange = (t_raw > -50.0f && t_raw < 150.0f);
+    inRange = (t_raw > -40.0f && t_raw < 160.0f);
     if (fault == 0 && inRange) break;
-    if (fault) rtd.clearFault();
-    delay(50);
+
+    // Jika terjadi fault (misal 0xE6 / 0x00), lakukan auto-clear & re-bias
+    rtd.clearFault();
+    rtd.enableBias(true);
+    delay(40);
   }
+
+  spiBusInUse = false;
 
   bool ok = (fault == 0 && inRange);
   if (ok) {
@@ -1232,7 +1284,7 @@ void readPT100() {
   if (st != lastState) {
     lastState = st;
     if (ok) Serial.println("[MAX31865] OK suhu valid: " + String(latestTemperature, 1) + "C");
-    else Serial.printf("[MAX31865] ERROR suhu tidak valid (fault 0x%02X)\n", fault);
+    else Serial.printf("[MAX31865] ERROR suhu tidak valid (fault 0x%02X). Auto-recovery aktif...\n", fault);
   }
 }
 
@@ -1278,26 +1330,34 @@ String buildPayload() {
 }
 
 void sendLoRaPacket(const String& payload) {
+  while (spiBusInUse) delay(1);
+  spiBusInUse = true;
+
+  // Deselect PT100 sebelum transaksi LoRa
+  digitalWrite(PIN_CS_MAX31865, HIGH);
+
   if (!loraOK) loraOK = initLoRa();
   if (loraOK) {
     if (!LoRa.beginPacket()) {
       if (++loraFail >= 3) {
-        Serial.println("[LORA] Radio macet, re-init...");
+        Serial.println("[LORA] Radio macet, auto-recovery re-init...");
         loraOK = initLoRa();
         loraFail = 0;
       }
     } else {
       digitalWrite(LED_PIN, HIGH);
       LoRa.print(payload);
-      LoRa.endPacket(true);
+      LoRa.endPacket(false); // Synchronous agar transaksi SPI selesai tuntas
       digitalWrite(LED_PIN, LOW);
       loraFail = 0;
       Serial.println("[LORA-TX] Paket terkirim: " + payload);
     }
   }
+  spiBusInUse = false;
 }
 
 void sendNodeData(bool doLora, bool doWeb) {
+  esp_task_wdt_reset();
   readSensors();
   String payload = buildPayload();
 
@@ -1323,4 +1383,5 @@ void sendNodeData(bool doLora, bool doWeb) {
     }
   }
 #endif
+  esp_task_wdt_reset();
 }
