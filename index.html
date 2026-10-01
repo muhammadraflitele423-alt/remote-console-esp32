@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Remote Console - Node ESP32 Bekaert</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background:#070b14;color:#f1f5f9;min-height:100vh;padding:16px}
+.wrap{max-width:980px;margin:0 auto}
+.card{background:#111827;border:1px solid #1f293d;border-radius:14px;padding:22px;box-shadow:0 20px 40px rgba(0,0,0,.6)}
+h1{font-size:1.25rem}
+.sub{font-size:.8rem;color:#94a3b8}
+.center{display:flex;align-items:center;justify-content:center;min-height:90vh}
+.login{width:100%;max-width:360px}
+.login input{width:100%;margin-top:12px;padding:10px 12px;background:#090d16;border:1px solid #334155;border-radius:8px;color:#f1f5f9;font-size:.95rem}
+.login input:focus{outline:none;border-color:#38bdf8}
+.btn{background:#0284c7;color:#fff;border:none;border-radius:8px;padding:10px 16px;font-weight:700;font-size:.9rem;cursor:pointer}
+.btn:hover{background:#0369a1}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn.sec{background:#1e293b;border:1px solid #334155;color:#cbd5e1;font-weight:600}
+.btn.sec:hover{background:#334155}
+.btn.danger{background:#b91c1c}
+.btn.danger:hover{background:#991b1b}
+.btn.small{padding:5px 10px;font-size:.75rem}
+.err{color:#f87171;font-size:.85rem;margin-top:10px;min-height:1.2em}
+.header{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid #1f293d}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+select{background:#090d16;border:1px solid #334155;color:#f1f5f9;padding:7px 10px;border-radius:8px;font-size:.85rem}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:9999px;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
+.pill.on{background:rgba(16,185,129,.12);color:#10b981;border:1px solid rgba(16,185,129,.28)}
+.pill.off{background:rgba(239,68,68,.12);color:#f87171;border:1px solid rgba(239,68,68,.28)}
+.dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:16px}
+.stat{background:#090d16;border:1px solid #1e293b;padding:9px 12px;border-radius:8px}
+.stat-l{font-size:.65rem;color:#64748b;text-transform:uppercase;font-weight:700}
+.stat-v{font-size:.88rem;color:#38bdf8;font-weight:700;margin-top:3px;word-break:break-all}
+.tabs{display:flex;gap:8px;background:#090d16;padding:6px;border-radius:10px;border:1px solid #1e293b;margin-bottom:16px}
+.tab{flex:1;padding:9px 10px;background:transparent;border:none;color:#94a3b8;font-size:.85rem;font-weight:600;border-radius:7px;cursor:pointer}
+.tab:hover{color:#f1f5f9;background:rgba(255,255,255,.04)}
+.tab.active{background:#0284c7;color:#fff}
+.pane{display:none}
+.pane.active{display:block}
+.toolbar{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;background:#090d16;border:1px solid #1e293b;border-bottom:none;border-radius:10px 10px 0 0;padding:10px 14px}
+.filter{background:#111827;border:1px solid #334155;color:#f1f5f9;padding:5px 10px;border-radius:6px;font-size:.78rem;width:170px}
+.label{display:inline-flex;align-items:center;gap:5px;font-size:.76rem;color:#94a3b8;cursor:pointer;user-select:none}
+.term{background:#050811;border:1px solid #1e293b;border-radius:0 0 10px 10px;height:460px;overflow-y:auto;padding:12px 14px;font-family:Consolas,'JetBrains Mono','Courier New',monospace;font-size:.8rem;line-height:1.5}
+.ln{display:flex;gap:10px;word-break:break-all;padding:1px 4px;border-radius:3px}
+.ln:hover{background:rgba(255,255,255,.03)}
+.ln .t{color:#64748b;font-size:.72rem;flex-shrink:0;margin-top:1px}
+.ln.srv{color:#fbbf24}
+.t-lora{color:#38bdf8;font-weight:600}.t-sens{color:#34d399;font-weight:600}.t-wifi{color:#fbbf24;font-weight:600}
+.t-http{color:#c084fc;font-weight:600}.t-rtd{color:#f59e0b;font-weight:600}.t-mpu{color:#06b6d4;font-weight:600}
+.t-err{color:#f87171;font-weight:700;background:rgba(239,68,68,.14);padding:0 4px;border-radius:3px}
+.t-ok{color:#4ade80;font-weight:600}.t-rem{color:#a78bfa;font-weight:600}
+.foot{margin-top:10px;font-size:.75rem;color:#64748b}
+.drop{border:2px dashed #334155;border-radius:10px;padding:22px 16px;text-align:center;cursor:pointer;background:rgba(9,13,22,.6)}
+.drop:hover{border-color:#38bdf8}
+input[type=file]{display:none}
+table{width:100%;border-collapse:collapse;margin-top:14px;font-size:.82rem}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid #1e293b;vertical-align:top}
+th{color:#64748b;font-size:.68rem;text-transform:uppercase}
+td.mono{font-family:Consolas,monospace;font-size:.76rem;word-break:break-all}
+.st-ok{color:#4ade80}.st-error,.st-timeout,.st-cancelled{color:#f87171}.st-queued,.st-sent,.st-running{color:#fbbf24}
+.warn{background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.3);color:#fbbf24;padding:10px 12px;border-radius:8px;font-size:.8rem;margin-bottom:14px;line-height:1.5}
+.sect{margin-bottom:22px}
+.sect h2{font-size:.95rem;margin-bottom:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div id="loginView" class="center">
+  <div class="card login">
+    <h1>Remote Console</h1>
+    <p class="sub">Node ESP32 &bull; PT Bekaert Indonesia</p>
+    <input id="lUser" type="text" placeholder="User" autocomplete="username">
+    <input id="lPass" type="password" placeholder="Password" autocomplete="current-password">
+    <div class="err" id="lErr"></div>
+    <button class="btn" style="width:100%;margin-top:6px" onclick="login()">Masuk</button>
+  </div>
+</div>
+
+<div id="appView" class="card" style="display:none">
+  <div class="header">
+    <div>
+      <h1>Remote Console</h1>
+      <p class="sub">Serial monitor, perintah, dan update firmware dari jarak jauh</p>
+    </div>
+    <div class="row">
+      <select id="nodeSel" onchange="onNodeChange()"></select>
+      <span id="onlinePill" class="pill off"><span class="dot"></span><span id="onlineTxt">--</span></span>
+      <button class="btn sec small" onclick="logout()">Keluar</button>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="stat-l">Terakhir terlihat</div><div class="stat-v" id="sSeen">--</div></div>
+    <div class="stat"><div class="stat-l">Build firmware</div><div class="stat-v" id="sFw">--</div></div>
+    <div class="stat"><div class="stat-l">IP / RSSI</div><div class="stat-v" id="sNet">--</div></div>
+    <div class="stat"><div class="stat-l">Uptime</div><div class="stat-v" id="sUp">--</div></div>
+    <div class="stat"><div class="stat-l">Free heap</div><div class="stat-v" id="sHeap">--</div></div>
+    <div class="stat"><div class="stat-l">MPU6050 / PT100</div><div class="stat-v" id="sSens">--</div></div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" id="tb-serial" onclick="tab('serial')">Serial Monitor</button>
+    <button class="tab" id="tb-fw" onclick="tab('fw')">Firmware (OTA)</button>
+    <button class="tab" id="tb-cmd" onclick="tab('cmd')">Perintah</button>
+  </div>
+
+  <div class="pane active" id="p-serial">
+    <div class="toolbar">
+      <div class="row">
+        <input class="filter" id="flt" placeholder="Filter..." oninput="renderLogs()">
+        <label class="label"><input type="checkbox" id="auto" checked> Auto-scroll</label>
+      </div>
+      <div class="row">
+        <button class="btn sec small" onclick="copyLogs()">Salin</button>
+        <button class="btn sec small" onclick="dlLogs()">Unduh</button>
+        <button class="btn sec small" onclick="clearView()">Bersihkan tampilan</button>
+        <button class="btn sec small" id="btnPause" onclick="togglePause()">Pause</button>
+      </div>
+    </div>
+    <div class="term" id="term"></div>
+    <div class="foot" id="serialInfo">Log tiba tiap beberapa detik (cepat selama halaman ini terbuka, lambat saat tidak ada yang menonton).</div>
+  </div>
+
+  <div class="pane" id="p-fw">
+    <div class="warn">
+      <b>Hati-hati:</b> firmware yang rusak bisa membuat node tidak bisa dijangkau lagi sampai dicolok USB.
+      Uji dulu firmware lewat OTA lokal pada satu node di meja, dan pastikan firmware baru <b>masih memuat klien remote ini</b>
+      dengan alamat server dan kunci yang benar. Gunakan file <b>.bin aplikasi</b> (Export Compiled Binary), bukan yang bernama
+      <i>bootloader</i> / <i>partitions</i>.
+    </div>
+    <div class="sect">
+      <h2>1. Unggah firmware ke server</h2>
+      <div class="drop" onclick="document.getElementById('fwFile').click()">
+        <p id="fwLabel">Klik untuk memilih file firmware (<b>.bin</b>)</p>
+        <input type="file" id="fwFile" accept=".bin" onchange="uploadFw(this)">
+      </div>
+      <div class="err" id="fwErr"></div>
+    </div>
+    <div class="sect">
+      <h2>2. Pilih firmware untuk di-deploy ke node terpilih</h2>
+      <table>
+        <thead><tr><th>Nama</th><th>Ukuran</th><th>MD5</th><th>Diunggah</th><th></th></tr></thead>
+        <tbody id="fwBody"><tr><td colspan="5" class="sub">Belum ada firmware.</td></tr></tbody>
+      </table>
+    </div>
+    <div class="sect">
+      <h2>Riwayat perintah</h2>
+      <table>
+        <thead><tr><th>#</th><th>Perintah</th><th>Status</th><th>Keterangan</th><th>Waktu</th></tr></thead>
+        <tbody class="cmdBody"><tr><td colspan="5" class="sub">Belum ada perintah.</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="pane" id="p-cmd">
+    <div class="sect">
+      <h2>Perintah cepat</h2>
+      <div class="row">
+        <button class="btn" onclick="sendCmd('send_now')">Kirim data sekarang</button>
+        <button class="btn danger" onclick="sendCmd('restart')">Restart node</button>
+      </div>
+      <div class="foot">Perintah diterima node pada sinkronisasi berikutnya (maks. beberapa detik saat halaman ini terbuka).</div>
+    </div>
+    <div class="sect">
+      <h2>Riwayat perintah</h2>
+      <table>
+        <thead><tr><th>#</th><th>Perintah</th><th>Status</th><th>Keterangan</th><th>Waktu</th></tr></thead>
+        <tbody class="cmdBody"><tr><td colspan="5" class="sub">Belum ada perintah.</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+const H = {'X-Requested-With':'rc'};
+let nodeId = null, lastSeq = 0, logs = [], paused = false, nodesCache = [], activeTab = 'serial', fwList = [];
+
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function fmtMs(ms){const s=Math.floor(ms/1000);return String(Math.floor(s/3600)).padStart(2,'0')+':'+String(Math.floor((s%3600)/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0');}
+function fmtTime(t){return t?new Date(t).toLocaleString('id-ID'):'--';}
+function fmtAgo(t){if(!t)return 'belum pernah';const s=Math.round((Date.now()-t)/1000);if(s<60)return s+' detik lalu';if(s<3600)return Math.floor(s/60)+' menit lalu';return Math.floor(s/3600)+' jam lalu';}
+function fmtUp(s){return Math.floor(s/3600)+'j '+Math.floor((s%3600)/60)+'m '+(s%60)+'d';}
+async function api(path, opt){
+  opt = opt || {};
+  opt.credentials = 'same-origin';
+  opt.headers = Object.assign({}, H, opt.headers || {});
+  const r = await fetch('api/' + path, opt);
+  if (r.status === 401 && path !== 'login') { showLogin(); throw new Error('login'); }
+  let j = {}; try { j = await r.json(); } catch(e) {}
+  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+
+// ---------- login
+function showLogin(){document.getElementById('loginView').style.display='flex';document.getElementById('appView').style.display='none';}
+function showApp(){document.getElementById('loginView').style.display='none';document.getElementById('appView').style.display='block';}
+async function login(){
+  const err=document.getElementById('lErr'); err.textContent='';
+  try{
+    await api('login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user:document.getElementById('lUser').value,password:document.getElementById('lPass').value})});
+    document.getElementById('lPass').value='';
+    start();
+  }catch(e){ if(e.message!=='login') err.textContent=e.message; }
+}
+document.getElementById('lPass').addEventListener('keydown',e=>{if(e.key==='Enter')login();});
+async function logout(){try{await api('logout',{method:'POST'});}catch(e){} location.reload();}
+
+// ---------- tab
+function tab(t){
+  activeTab=t;
+  for(const x of ['serial','fw','cmd']){
+    document.getElementById('p-'+x).classList.toggle('active',x===t);
+    document.getElementById('tb-'+x).classList.toggle('active',x===t);
+  }
+  if(t==='fw') loadFw();
+  loadCmds();
+}
+
+// ---------- node
+async function loadNodes(){
+  const d=await api('nodes');
+  nodesCache=d.nodes;
+  const sel=document.getElementById('nodeSel');
+  const cur=sel.value;
+  sel.innerHTML=d.nodes.length?d.nodes.map(n=>'<option value="'+n.id+'">Node '+n.id+(n.online?' (online)':' (offline)')+'</option>').join(''):'<option value="">Belum ada node</option>';
+  if(nodeId===null && d.nodes.length){nodeId=d.nodes[0].id;}
+  if(nodeId!==null) sel.value=String(nodeId); else if(cur) sel.value=cur;
+  const n=d.nodes.find(x=>x.id===nodeId);
+  const pill=document.getElementById('onlinePill');
+  if(n){
+    pill.className='pill '+(n.online?'on':'off');
+    document.getElementById('onlineTxt').textContent=n.online?'Online':'Offline';
+    document.getElementById('sSeen').textContent=fmtAgo(n.last_seen);
+    const i=n.info||{};
+    document.getElementById('sFw').textContent=i.fw||'--';
+    document.getElementById('sNet').textContent=(i.ip||'--')+' / '+(i.rssi||'--')+' dBm';
+    document.getElementById('sUp').textContent=i.uptime_s!==undefined?fmtUp(i.uptime_s):'--';
+    document.getElementById('sHeap').textContent=i.heap?Math.round(i.heap/1024)+' KB':'--';
+    document.getElementById('sSens').textContent=(i.mpu?'OK':'ERROR')+' / '+(i.rtd?'OK':'ERROR');
+  }else{
+    pill.className='pill off';document.getElementById('onlineTxt').textContent='Tidak ada node';
+  }
+}
+function onNodeChange(){
+  const v=parseInt(document.getElementById('nodeSel').value,10);
+  if(!isNaN(v)){nodeId=v;lastSeq=0;logs=[];renderLogs();loadLogs();loadCmds();loadNodes();}
+}
+
+// ---------- log
+function colorize(t){
+  let e=esc(t);
+  e=e.replace(/(\[LORA-TX\]|\[LORA\])/g,'<span class="t-lora">$1</span>');
+  e=e.replace(/(\[SENSORS\]|\[VIB\])/g,'<span class="t-sens">$1</span>');
+  e=e.replace(/(\[WIFI\])/g,'<span class="t-wifi">$1</span>');
+  e=e.replace(/(\[HTTP\])/g,'<span class="t-http">$1</span>');
+  e=e.replace(/(\[MAX31865\])/g,'<span class="t-rtd">$1</span>');
+  e=e.replace(/(\[MPU6050\])/g,'<span class="t-mpu">$1</span>');
+  e=e.replace(/(\[REMOTE\]|\[SUPERVISOR\]|\[BOOT\])/g,'<span class="t-rem">$1</span>');
+  e=e.replace(/(GAGAL|Error|ERROR|FAULT|PANIC|BROWNOUT)/g,'<span class="t-err">$1</span>');
+  e=e.replace(/(OK|NORMAL|Sukses)/g,'<span class="t-ok">$1</span>');
+  return e;
+}
+function renderLogs(){
+  const box=document.getElementById('term');
+  const q=document.getElementById('flt').value.toLowerCase().trim();
+  let h='',n=0;
+  for(const l of logs){
+    if(q && !l.msg.toLowerCase().includes(q)) continue;
+    n++;
+    const srv=l.msg.startsWith('--- [SERVER]');
+    h+='<div class="ln'+(srv?' srv':'')+'"><span class="t">['+fmtMs(l.ms)+']</span><span>'+colorize(l.msg)+'</span></div>';
+  }
+  if(!n) h='<div style="text-align:center;padding:40px;color:#64748b">'+(logs.length?'Tidak ada log yang cocok dengan filter.':'Menunggu log dari node...')+'</div>';
+  box.innerHTML=h;
+  if(document.getElementById('auto').checked) box.scrollTop=box.scrollHeight;
+}
+async function loadLogs(){
+  if(paused||nodeId===null) return;
+  try{
+    const d=await api('logs?node_id='+nodeId+'&since='+lastSeq);
+    if(d.lines.length){
+      logs=logs.concat(d.lines);
+      if(logs.length>1500) logs=logs.slice(logs.length-1500);
+      renderLogs();
+    }
+    lastSeq=d.last_seq;
+  }catch(e){}
+}
+function togglePause(){paused=!paused;const b=document.getElementById('btnPause');b.textContent=paused?'Lanjut':'Pause';}
+function clearView(){logs=[];renderLogs();}
+function logText(){return logs.map(l=>'['+fmtMs(l.ms)+'] '+l.msg).join('\n');}
+function copyLogs(){navigator.clipboard.writeText(logText()).then(()=>alert('Log disalin'));}
+function dlLogs(){
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([logText()],{type:'text/plain'}));
+  a.download='node'+nodeId+'_log_'+Date.now()+'.txt';a.click();
+}
+
+// ---------- perintah
+async function loadCmds(){
+  if(nodeId===null) return;
+  try{
+    const d=await api('commands?node_id='+nodeId);
+    const rows=d.commands.length?d.commands.map(c=>{
+      const name=c.type==='ota'?('OTA: '+esc(c.fw_name||c.fw_id)):esc(c.type);
+      const cancel=c.status==='queued'?' <button class="btn sec small" onclick="cancelCmd('+c.id+')">Batal</button>':'';
+      return '<tr><td>'+c.id+'</td><td>'+name+'</td><td class="st-'+c.status+'">'+esc(c.status)+cancel+'</td><td>'+esc(c.message||'')+'</td><td>'+fmtTime(c.createdAt)+'</td></tr>';
+    }).join(''):'<tr><td colspan="5" class="sub">Belum ada perintah.</td></tr>';
+    document.querySelectorAll('.cmdBody').forEach(el=>el.innerHTML=rows);
+  }catch(e){}
+}
+async function sendCmd(type,fwId){
+  if(nodeId===null){alert('Belum ada node terhubung');return;}
+  if(type==='restart' && !confirm('Restart Node '+nodeId+'?')) return;
+  try{
+    await api('command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({node_id:nodeId,type:type,fw_id:fwId})});
+    loadCmds();
+  }catch(e){alert('Gagal: '+e.message);}
+}
+async function cancelCmd(id){try{await api('command/'+nodeId+'/'+id,{method:'DELETE'});loadCmds();}catch(e){alert(e.message);}}
+
+// ---------- firmware
+async function loadFw(){
+  try{
+    const d=await api('firmware'); fwList=d.firmware;
+    document.getElementById('fwBody').innerHTML=fwList.length?fwList.map(f=>
+      '<tr><td>'+esc(f.name)+'</td><td>'+Math.round(f.size/1024)+' KB</td><td class="mono">'+f.md5+'</td><td>'+fmtTime(f.uploadedAt)+'</td><td>'+
+      '<button class="btn small" onclick="deploy(\''+f.id+'\')">Deploy ke Node '+nodeId+'</button> '+
+      '<button class="btn sec small" onclick="delFw(\''+f.id+'\')">Hapus</button></td></tr>'
+    ).join(''):'<tr><td colspan="5" class="sub">Belum ada firmware.</td></tr>';
+  }catch(e){}
+}
+async function uploadFw(inp){
+  const err=document.getElementById('fwErr');err.textContent='';
+  const f=inp.files[0]; if(!f) return;
+  document.getElementById('fwLabel').textContent='Mengunggah '+f.name+'...';
+  try{
+    await api('firmware?name='+encodeURIComponent(f.name),{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:f});
+    document.getElementById('fwLabel').innerHTML='Terunggah: <b>'+esc(f.name)+'</b>. Pilih file lain untuk mengunggah lagi.';
+    loadFw();
+  }catch(e){err.textContent=e.message;document.getElementById('fwLabel').innerHTML='Klik untuk memilih file firmware (<b>.bin</b>)';}
+  inp.value='';
+}
+async function delFw(id){if(confirm('Hapus firmware ini dari server?')){try{await api('firmware/'+id,{method:'DELETE'});loadFw();}catch(e){alert(e.message);}}}
+function deploy(id){
+  const f=fwList.find(x=>x.id===id); if(!f) return;
+  if(!confirm('Deploy "'+f.name+'" ('+Math.round(f.size/1024)+' KB) ke Node '+nodeId+'?\n\nNode akan mengunduh, memasang, lalu restart. Jika firmware rusak, node harus dicolok USB untuk dipulihkan.')) return;
+  sendCmd('ota',id);
+}
+
+// ---------- mulai
+async function start(){
+  showApp();
+  await loadNodes().catch(()=>{});
+  loadLogs(); loadCmds();
+}
+setInterval(()=>{ if(document.getElementById('appView').style.display!=='none') loadNodes().catch(()=>{}); },3000);
+setInterval(loadLogs,2000);
+setInterval(()=>{ if(activeTab!=='serial') loadCmds(); },3000);
+api('me').then(()=>start()).catch(()=>showLogin());
+</script>
+</body>
+</html>

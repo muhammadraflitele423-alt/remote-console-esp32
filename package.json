@@ -1,0 +1,11 @@
+{
+  "name": "remote-console-esp32",
+  "version": "1.0.0",
+  "description": "Remote serial monitor, perintah, dan OTA firmware untuk node ESP32 (PT Bekaert Indonesia)",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" },
+  "dependencies": { "express": "^4.19.2" },
+  "license": "UNLICENSED",
+  "private": true
+}
