@@ -115,10 +115,8 @@ TEMPEL_ROOT_CA_DI_SINI
 // ==============================================================================
 #define REMOTE_CONSOLE_ENABLED    1               // 1 = aktifkan sinkronisasi ke server.js
 
-// URL Server Remote Console:
-// - Jika di jaringan WiFi lokal yang sama: gunakan IP PC/laptop Anda, misal: "http://192.168.1.100:3000"
-// - Jika di-deploy ke cloud (Railway / Render / VPS): gunakan URL publik Anda, misal: "https://nama-app.up.railway.app"
-const char* REMOTE_SERVER_URL     = "http://192.168.1.100:3000";
+// URL Server Remote Console publik yang sudah aktif di Railway:
+const char* REMOTE_SERVER_URL     = "https://remote-console-esp32-production.up.railway.app";
 
 // API Key perangkat: HARUS SAMA PERSIS dengan DEVICE_API_KEY di file .env server
 const char* REMOTE_API_KEY        = "bekaert_esp32_device_key_2026";
